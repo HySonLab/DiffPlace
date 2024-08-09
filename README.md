@@ -19,4 +19,5 @@ Slides can be  found [here](https://docs.google.com/presentation/d/1lNS5O4BqGrds
 ## Exercises
 The exercises can be found [here](https://github.com/joerg84/Graph_Powered_ML_Workshop/tree/master/excercises), please refer to slides for logistics.
 
+## Graoh Data
 
