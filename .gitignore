@@ -1,0 +1,5 @@
+.ipynb_checkpoints
+.tox
+.DS_Store
+data/superblue19/edge.pkl
+data/superblue19_processed/hetero_900.pickle

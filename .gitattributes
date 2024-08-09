@@ -1,0 +1,4 @@
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb
+data/superblue19/edge.pkl filter=lfs diff=lfs merge=lfs -text
+data/superblue19_processed/hetero_900.pickle filter=lfs diff=lfs merge=lfs -text
