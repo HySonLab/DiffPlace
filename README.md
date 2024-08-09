@@ -19,5 +19,7 @@ Slides can be  found [here](https://docs.google.com/presentation/d/1lNS5O4BqGrds
 ## Exercises
 The exercises can be found [here](https://github.com/joerg84/Graph_Powered_ML_Workshop/tree/master/excercises), please refer to slides for logistics.
 
-## Graoh Data
+## Graph Data
+
+Hetero graph and Egdes infor could be found in: https://drive.google.com/drive/folders/1ZJ9JSfICTiHZanR3mOv3vW0lEU91XDJW?usp=drive_link
 
