@@ -1,2 +1,2 @@
-# Machine Learning for Chip Design
+# DiffPlace: A Conditional Diffusion Framework for Simultaneous VLSI Placement Beyond Sequential Paradigms
 
