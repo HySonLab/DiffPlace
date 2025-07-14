@@ -1,0 +1,24 @@
+# Hướng dẫn chạy DREAMPlace từ một terminal mới
+
+# Quan trọng: Các lệnh này giả định rằng bạn đang mở terminal ở một vị trí bất kỳ.
+
+# 1. Di chuyển đến thư mục gốc của dự án DREAMPlace.
+#    (Nếu bạn di chuyển dự án, hãy cập nhật đường dẫn này).
+cd /home/tludemo/hinhnv/kienle/kienle/DREAMPlace
+
+# 2. Kích hoạt môi trường ảo (venv) đã được cài đặt.
+#    Môi trường này được lưu trong thư mục 'dreamplace_py39'.
+#    Lưu ý: Tuyệt đối không thay đổi môi trường này.
+source dreamplace_py39/bin/activate
+
+# 3. Chạy chương trình Placer với một tệp benchmark ví dụ (adaptec3).
+#    Lệnh này phải được thực thi từ thư mục gốc của dự án để đảm bảo 
+#    các đường dẫn tương đối đến dữ liệu benchmark được tìm thấy chính xác.
+python install/dreamplace/Placer.py install/test/ispd2005/adaptec3.json
+
+# ---
+# Ghi chú:
+# Để chạy với các benchmark khác, bạn chỉ cần thay đổi tệp .json ở cuối lệnh.
+# Ví dụ:
+# python install/dreamplace/Placer.py install/test/ispd2005/adaptec1.json
+# python install/dreamplace/Placer.py install/test/ispd2015/lefdef/mgc_des_perf_a.json 
