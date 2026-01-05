@@ -1,14 +1,10 @@
 # DiffPlace - A Conditional Diffusion Framework for Simultaneous VLSI Placement Beyond Sequential Paradigms
 
-# DiffPlace - Diffusion-based Macro Placement
-
-Physics-informed diffusion model for VLSI macro placement with analytical legalization.
-
-[![arXiv](https://img.shields.io/badge/arXiv-2510.15897-b31b1b.svg)](https://arxiv.org/pdf/2510.15897)
+Paper: [![arXiv](https://img.shields.io/badge/arXiv-2510.15897-b31b1b.svg)](https://arxiv.org/pdf/2510.15897)
 
 ## Experimental Results
 
-Below are the placement results on ISPD2005 benchmarks using DiffPlace.
+The placement results on ISPD2005 benchmarks
 
 | Adaptec1 | Adaptec2 | Adaptec3 | Adaptec4 |
 |----------|----------|----------|----------|
@@ -59,7 +55,4 @@ python scripts/deploy.py \
 pip install -r requirements.txt
 ```
 
-## Data
-
-Download ISPD2005 benchmarks from [DREAMPlace](https://github.com/limbo018/DREAMPlace/tree/master/benchmarks)
 
