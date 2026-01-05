@@ -10,7 +10,7 @@ The placement results on ISPD2005 benchmarks
 |----------|----------|----------|----------|
 | ![adaptec1](asset/images/adaptec1_mixed.png) | ![adaptec2](asset/images/adaptec2_mixed.png) | ![adaptec3](asset/images/adaptec3_mixed.png) | ![adaptec4](asset/images/adaptec4_mixed.png) |
 
-| BigBlue1 | BigBlue2 | BigBlue3 | BigBlue4 |
+| Bigblue1 | Bigblue2 | Bigblue3 | Bigblue4 |
 |----------|----------|----------|----------|
 | ![bigblue1](asset/images/bigblue1_mixed.png) | ![bigblue2](asset/images/bigblue2_mixed.png) | ![bigblue3](asset/images/bigblue3_mixed.png) | ![bigblue4](asset/images/bigblue4_mixed.png) |
 
