@@ -1,0 +1,97 @@
+# =============================================================================
+# DiffPlace Pre-training Configuration - PRODUCTION SCALE
+# 
+# Stage 1: Pre-train on synthetic dataset
+# Model: ~12M params (production scale)
+# =============================================================================
+
+experiment:
+  name: "diffplace_pretrain_prod"
+  seed: 42
+  output_dir: "outputs/pretrain"
+  wandb:
+    enabled: true
+    project: "diffplace"
+    tags: ["pretrain", "production", "12M"]
+
+# Dataset
+data:
+  type: "pickle"
+  train_path: "data/synthetic/train.pkl"
+  val_path: "data/synthetic/val.pkl"
+  batch_size: 128  # Maximize VRAM usage (~20-25GB target)
+  num_workers: 16
+  pin_memory: true
+
+# Model - PRODUCTION SCALE (~12M params)
+model:
+  type: "DiffPlace"
+  hidden_size: 256          # 4x increase from test
+  num_blocks: 8             # Deep for long-range dependencies
+  layers_per_block: 2
+  num_heads: 8              # Multi-head attention
+  num_rotations: 4
+  rotation_temperature: 1.0
+  global_context_every: 2   # Global context every 2 blocks
+  mask_key: "is_ports"
+  
+  # Memory optimization
+  gradient_checkpointing: true  # Trade compute for memory
+
+# Diffusion
+diffusion:
+  max_steps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  sampler: "ddim"
+  ddim_steps: 50
+  ddim_eta: 0.0
+
+# Guidance (Trinity)
+guidance:
+  grid_size: 64
+  density_sigma: 2.0
+  target_density: 1.0
+  hpwl_gamma: 10.0
+  rudy_threshold: 1.0
+  density_weight: 1.0
+  hpwl_weight: 1.0
+  rudy_weight: 0.5
+  boundary_weight: 10.0
+  guidance_start_step: 0.7
+  guidance_strength: 1.0
+
+# Training - OPTIMIZED FOR LARGE MODEL
+training:
+  total_steps: 100000
+  lr: 1e-4
+  weight_decay: 0.01
+  optimizer: "adamw"
+  
+  # Mixed Precision - MANDATORY for 12M model
+  precision: "bf16"  # BFloat16 for stability
+  
+  # Gradient accumulation (not needed with large batch)
+  gradient_accumulation_steps: 1
+  effective_batch_size: 128  # same as batch_size
+  
+  # Gradient clipping
+  grad_clip_norm: 1.0
+  
+  # Scheduler
+  warmup_steps: 2000
+  min_lr: 1e-6
+  
+  # EMA
+  use_ema: true
+  ema_decay: 0.9999
+  
+  # Logging
+  log_every: 50
+  save_every: 5000
+  eval_every: 2500
+
+# Transfer (not used in pretrain)
+transfer:
+  pretrained_path: null
+  freeze_encoder_steps: 0

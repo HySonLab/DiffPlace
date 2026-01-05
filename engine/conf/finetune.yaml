@@ -1,0 +1,100 @@
+# =============================================================================
+# DiffPlace Fine-tuning Configuration - PRODUCTION SCALE
+#
+# Stage 2: Fine-tune on ISPD real dataset
+# Model: ~12M params, lower LR, backbone freeze
+# =============================================================================
+
+experiment:
+  name: "diffplace_finetune_ispd_prod"
+  seed: 42
+  output_dir: "outputs/finetune"
+  wandb:
+    enabled: true
+    project: "diffplace"
+    tags: ["finetune", "ispd", "production"]
+
+# Dataset
+data:
+  type: "ispd"
+  data_dir: "data/ispd2005"
+  benchmark: "adaptec1"
+  batch_size: 1  # Large real graphs
+  num_workers: 2
+  pin_memory: true
+
+# Model - MUST MATCH PRETRAIN
+model:
+  type: "DiffPlace"
+  hidden_size: 256
+  num_blocks: 8
+  layers_per_block: 2
+  num_heads: 8
+  num_rotations: 4
+  rotation_temperature: 0.3  # Sharper for fine-tuning
+  global_context_every: 2
+  mask_key: "is_ports"
+  
+  # Memory optimization
+  gradient_checkpointing: true
+
+# Diffusion
+diffusion:
+  max_steps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  sampler: "ddim"
+  ddim_steps: 50
+  ddim_eta: 0.0
+
+# Guidance (stronger for real data)
+guidance:
+  grid_size: 128  # Higher resolution
+  density_sigma: 2.0
+  target_density: 0.7  # Stricter
+  hpwl_gamma: 15.0
+  rudy_threshold: 0.7
+  density_weight: 2.0  # More emphasis on legality
+  hpwl_weight: 1.0
+  rudy_weight: 1.0
+  boundary_weight: 20.0
+  guidance_start_step: 0.8
+  guidance_strength: 2.0
+
+# Training - FINE-TUNING SETTINGS
+training:
+  total_steps: 30000
+  lr: 2e-5  # 5x lower than pretrain
+  weight_decay: 0.01
+  optimizer: "adamw"
+  
+  # Mixed Precision
+  precision: "bf16"
+  
+  # Gradient accumulation
+  gradient_accumulation_steps: 8
+  
+  # Stricter gradient clipping
+  grad_clip_norm: 0.5
+  
+  # Rotation loss weight (fix green bias)
+  rotation_loss_weight: 2.0  # Higher than default 0.5 to penalize wrong rotations
+  
+  # Scheduler
+  warmup_steps: 500
+  min_lr: 1e-7
+  
+  # EMA
+  use_ema: true
+  ema_decay: 0.9999
+  
+  # Logging
+  log_every: 25
+  save_every: 2000
+  eval_every: 500
+
+# Transfer Learning - CRITICAL
+transfer:
+  pretrained_path: "<YOUR_PRETRAINED_CHECKPOINT>  # Path to pretrained model"
+  freeze_encoder_steps: 2000  # Freeze backbone for 2000 steps
+  strict_loading: false
