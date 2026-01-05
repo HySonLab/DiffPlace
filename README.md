@@ -1,6 +1,4 @@
-# DiffPlace - Diffusion-based Macro Placement
-
-Physics-informed diffusion model for VLSI macro placement with analytical legalization.
+# DiffPlace - A Conditional Diffusion Framework for Simultaneous VLSI Placement Beyond Sequential Paradigms
 
 ## Project Structure
 
