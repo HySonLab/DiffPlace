@@ -128,7 +128,6 @@ class BookshelfParser:
         if pl_file is None:
             raise FileNotFoundError(f"No placement file found for {self.benchmark_name}")
         
-        print(f"  Using placement: {os.path.basename(pl_file)}")
         
         with open(pl_file, 'r') as f:
             for line in f:

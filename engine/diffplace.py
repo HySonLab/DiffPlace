@@ -16,6 +16,7 @@ import math
 
 from engine.networks.vector_gnn import VectorGNNV2Global, VectorGNNV2GlobalLarge, DiscreteRotationHead
 from engine.diffusion.trinity_guidance import TrinityGuidance, GradientBalancer
+from engine.diffusion.overlap_loss import OverlapLoss
 
 
 class DiffPlace(nn.Module):
@@ -144,7 +145,7 @@ class DiffPlace(nn.Module):
         if hasattr(self.backbone, 'blocks'):
             for block in self.backbone.blocks:
                 block.gradient_checkpointing = True
-        print("Gradient checkpointing ENABLED")
+        # print("Gradient checkpointing ENABLED")
     
     def gradient_checkpointing_disable(self):
         """Disable gradient checkpointing."""
@@ -152,7 +153,7 @@ class DiffPlace(nn.Module):
         if hasattr(self.backbone, 'blocks'):
             for block in self.backbone.blocks:
                 block.gradient_checkpointing = False
-        print("Gradient checkpointing DISABLED")
+        # print("Gradient checkpointing DISABLED")
     
     def _init_time_encoding(self, T, dim):
         """Initialize sinusoidal time encoding table."""
@@ -299,6 +300,13 @@ class DiffPlace(nn.Module):
         cond,
         batch_size: int = 1,
         guidance_scale: float = 1.0,
+        overlap_guidance: bool = False,
+        overlap_guidance_scale_max: float = 1000.0,
+        overlap_guidance_power: float = 2.0,
+        overlap_sizes: Optional[torch.Tensor] = None,
+        overlap_guidance_start_frac: float = 0.0,
+        overlap_guidance_grad_norm: Optional[float] = None,
+        overlap_guidance_grad_clip: Optional[float] = None,
         return_intermediates: bool = False,
         intermediate_every: int = 100,
     ) -> Tuple[torch.Tensor, torch.Tensor, list]:
@@ -338,6 +346,8 @@ class DiffPlace(nn.Module):
         
         intermediates = []
         
+        overlap_loss_fn = OverlapLoss().to(device)
+
         # Reverse diffusion
         for t in range(T, 0, -1):
             t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
@@ -345,6 +355,46 @@ class DiffPlace(nn.Module):
             # Predict noise and rotation
             eps_pred, rot_onehot, rot_logits = self(x, cond, t_tensor)
             
+            # === Gradient-Guided Legalization (overlap forbiddance) ===
+            if overlap_guidance:
+                # Quadratic schedule: small early, large late
+                frac = 1.0 - (float(t) / float(T))
+                if frac < float(overlap_guidance_start_frac):
+                    lambda_t = 0.0
+                else:
+                    lambda_t = float(overlap_guidance_scale_max) * (frac ** float(overlap_guidance_power))
+
+                if lambda_t > 0:
+                    macro_mask = None
+                    if hasattr(cond, self.mask_key):
+                        # Ports are fixed; guide only movable nodes
+                        macro_mask = ~getattr(cond, self.mask_key)
+
+                    with torch.enable_grad():
+                        x_grad = x.detach().requires_grad_(True)
+                        sizes = overlap_sizes
+                        if sizes is None and hasattr(cond, "overlap_sizes"):
+                            sizes = getattr(cond, "overlap_sizes")
+                        if sizes is None:
+                            sizes = cond.x
+                        if rot_onehot is not None:
+                            sizes = DiscreteRotationHead.compute_effective_size(
+                                sizes, rot_onehot.detach()
+                            )
+                        loss_ov = overlap_loss_fn(x_grad, sizes, macro_mask=macro_mask)
+                        g = torch.autograd.grad(loss_ov, x_grad, retain_graph=False, create_graph=False)[0]
+                    g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0).detach()
+                    if overlap_guidance_grad_norm is not None or overlap_guidance_grad_clip is not None:
+                        eps = 1e-12
+                        gn = torch.linalg.vector_norm(g, ord=2, dim=-1, keepdim=True)
+                        if overlap_guidance_grad_norm is not None:
+                            g = g * (float(overlap_guidance_grad_norm) / (gn + eps))
+                        if overlap_guidance_grad_clip is not None:
+                            clip = float(overlap_guidance_grad_clip)
+                            scale = torch.clamp(clip / (gn + eps), max=1.0)
+                            g = g * scale
+                    eps_pred = eps_pred - (lambda_t * g)
+
             # DDPM update
             alpha_t = self.alphas[t - 1]
             alpha_bar_t = self.alpha_bar[t - 1]
@@ -398,6 +448,13 @@ class DiffPlace(nn.Module):
         num_inference_steps: int = 50,
         eta: float = 0.0,
         guidance_scale: float = 1.0,
+        overlap_guidance: bool = False,
+        overlap_guidance_scale_max: float = 1000.0,
+        overlap_guidance_power: float = 2.0,
+        overlap_sizes: Optional[torch.Tensor] = None,
+        overlap_guidance_start_frac: float = 0.0,
+        overlap_guidance_grad_norm: Optional[float] = None,
+        overlap_guidance_grad_clip: Optional[float] = None,
         return_intermediates: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, list]:
         """
@@ -441,6 +498,8 @@ class DiffPlace(nn.Module):
             x = torch.where(mask_3d, fixed_pos, x)
         
         intermediates = []
+
+        overlap_loss_fn = OverlapLoss().to(device)
         
         # DDIM reverse process
         for i, t in enumerate(timesteps):
@@ -457,6 +516,45 @@ class DiffPlace(nn.Module):
             
             # Predict noise
             eps_pred, rot_onehot, _ = self(x, cond, t_tensor)
+
+            # === Gradient-Guided Legalization (overlap forbiddance) ===
+            if overlap_guidance:
+                # Quadratic schedule: small early, large late
+                frac = 1.0 - (float(t.item()) / float(T))
+                if frac < float(overlap_guidance_start_frac):
+                    lambda_t = 0.0
+                else:
+                    lambda_t = float(overlap_guidance_scale_max) * (frac ** float(overlap_guidance_power))
+
+                if lambda_t > 0:
+                    macro_mask = None
+                    if hasattr(cond, self.mask_key):
+                        macro_mask = ~getattr(cond, self.mask_key)
+
+                    with torch.enable_grad():
+                        x_grad = x.detach().requires_grad_(True)
+                        sizes = overlap_sizes
+                        if sizes is None and hasattr(cond, "overlap_sizes"):
+                            sizes = getattr(cond, "overlap_sizes")
+                        if sizes is None:
+                            sizes = cond.x
+                        if rot_onehot is not None:
+                            sizes = DiscreteRotationHead.compute_effective_size(
+                                sizes, rot_onehot.detach()
+                            )
+                        loss_ov = overlap_loss_fn(x_grad, sizes, macro_mask=macro_mask)
+                        g = torch.autograd.grad(loss_ov, x_grad, retain_graph=False, create_graph=False)[0]
+                    g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0).detach()
+                    if overlap_guidance_grad_norm is not None or overlap_guidance_grad_clip is not None:
+                        eps = 1e-12
+                        gn = torch.linalg.vector_norm(g, ord=2, dim=-1, keepdim=True)
+                        if overlap_guidance_grad_norm is not None:
+                            g = g * (float(overlap_guidance_grad_norm) / (gn + eps))
+                        if overlap_guidance_grad_clip is not None:
+                            clip = float(overlap_guidance_grad_clip)
+                            scale = torch.clamp(clip / (gn + eps), max=1.0)
+                            g = g * scale
+                    eps_pred = eps_pred - (lambda_t * g)
             
             # Current alpha values
             alpha_bar_t = self.alpha_bar[t_idx]

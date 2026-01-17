@@ -1,0 +1,12 @@
+torch>=2.0.0
+torch-geometric>=2.3.0
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# QP Legalizer dependencies
+cvxpy>=1.4.0
+networkx>=3.0
+osqp>=0.6.0

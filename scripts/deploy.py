@@ -1,15 +1,4 @@
 #!/usr/bin/env python
-"""
-DiffPlace DUAL-STAGE INFERENCE
-
-Stage 1: Inference-time Density Guidance (Differentiable)
-Stage 2: Analytical Legalizer (Global Spreading)
-
-Target: 0% Overlap with minimal HPWL increase.
-
-Usage:
-    python scripts/deploy.py --checkpoint <YOUR_CHECKPOINT_PATH>
-"""
 
 import os
 import sys
@@ -30,6 +19,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from engine.diffplace import DiffPlace
 from engine.datasets.ispd_dataset import BookshelfParser
 from torch_geometric.data import Data
+from engine.diffusion.overlap_loss import OverlapLoss
+
+from scripts.sp_legalizer import SequencePairLegalizer
+
+# No stdout printing in scripts (requested)
+
 
 
 # ============================================================================
@@ -388,8 +383,7 @@ class AnalyticalLegalizer:
         self.momentum = self.initial_momentum
         
         if self.verbose:
-            print(f"    Physics Legalizer: {N} macros, iters={self.num_iters}, "
-                  f"step={self.step_size:.1f}, momentum={self.momentum:.2f}, decay={self.decay_rate}")
+            pass
         
         # === PHYSICS SIMULATION WITH COOLING ===
         for iteration in range(self.num_iters):
@@ -431,8 +425,7 @@ class AnalyticalLegalizer:
             # Debug logging every 100 iterations
             if self.verbose and iteration % 100 == 0:
                 avg_vel = np.mean(np.abs(velocity))
-                print(f"    Step {iteration:4d}: Density={max_density:.2f}, "
-                      f"AvgVel={avg_vel:.2f}, step={self.step_size:.3f}")
+                pass
             
             # COOLING: Decay step_size and momentum
             self.step_size *= self.decay_rate
@@ -441,11 +434,11 @@ class AnalyticalLegalizer:
             # Early stop if converged
             if max_density < self.target_density + 0.1 and max_force < 0.5:
                 if self.verbose:
-                    print(f"    Converged at step {iteration}")
+                    pass
                 break
         
         if self.verbose:
-            print(f"    Final step_size: {self.step_size:.4f} (from {self.initial_step_size})")
+            pass
         
         # === ROBUST FINISHER ===
         positions = self._finalize_positions(positions, sizes, names)
@@ -482,7 +475,7 @@ class AnalyticalLegalizer:
             return coarse_pos
         
         if self.verbose:
-            print(f"    Robust Finisher: Processing {N} macros...")
+            pass
         
         # High-resolution occupancy grid
         grid_res = max(self.die.row_height, 5)
@@ -552,7 +545,7 @@ class AnalyticalLegalizer:
             final_pos[idx] = [x, y]
         
         if self.verbose:
-            print(f"    Macros shifted during finalization: {shifted_count}/{N}")
+            pass
         
         return final_pos
     
@@ -648,13 +641,25 @@ class TetrisLegalizer:
     Run this AFTER AnalyticalLegalizer for cleanup.
     """
     
-    def __init__(self, die_bounds: 'DieBounds', grid_resolution: float = 10.0):
+    def __init__(
+        self,
+        die_bounds: 'DieBounds',
+        grid_resolution: float = 10.0,
+        max_radius: Optional[int] = None,
+        fallback_scan: bool = True,
+        pick_best: bool = True,
+        strict: bool = False,
+    ):
         self.die = die_bounds
         self.grid_res = grid_resolution
         self.grid_w = int(np.ceil(die_bounds.width / grid_resolution))
         self.grid_h = int(np.ceil(die_bounds.height / grid_resolution))
         self.grid = np.zeros((self.grid_h, self.grid_w), dtype=bool)
         self.max_disp = die_bounds.width  # Can search entire die
+        self.max_radius = max_radius if max_radius is not None else max(self.grid_w, self.grid_h)
+        self.fallback_scan = fallback_scan
+        self.pick_best = pick_best
+        self.strict = strict
     
     def _to_grid(self, x: float, y: float) -> Tuple[int, int]:
         gx = int((x - self.die.x_min) / self.grid_res)
@@ -690,23 +695,74 @@ class TetrisLegalizer:
         if not self._check_overlap(x, y, w, h):
             return x, y
         
-        # Spiral search with large radius
-        step_x = max(self.die.site_width * 5, 10)
-        step_y = max(self.die.row_height, 10)
-        
-        for radius in range(1, 500):  # Large search radius
+        # Local ring search (fine-grained): preserve HPWL/layout by preferring minimal displacement.
+        step_x = max(self.die.site_width, 1e-6)
+        step_y = max(self.die.row_height, 1e-6)
+
+        best = None
+        best_d2 = float("inf")
+
+        for radius in range(1, int(self.max_radius) + 1):
+            # Manhattan ring
             for dx in range(-radius, radius + 1):
-                for dy in [-radius, radius] if abs(dx) < radius else range(-radius, radius + 1):
+                dy_abs = radius - abs(dx)
+                for dy in (-dy_abs, dy_abs) if dy_abs != 0 else (0,):
                     nx = x + dx * step_x
                     ny = y + dy * step_y
                     nx, ny = self._snap(nx, ny)
                     nx = max(self.die.x_min, min(self.die.x_max - w, nx))
                     ny = max(self.die.y_min, min(self.die.y_max - h, ny))
-                    
+
                     if not self._check_overlap(nx, ny, w, h):
-                        return nx, ny
-        
-        return x, y  # Fallback
+                        if not self.pick_best:
+                            return nx, ny
+                        d2 = (nx - x) ** 2 + (ny - y) ** 2
+                        if d2 < best_d2:
+                            best_d2 = d2
+                            best = (nx, ny)
+            if best is not None:
+                return best
+
+        # Fallback: scan entire grid, but prioritize near the original location by expanding radius.
+        if self.fallback_scan:
+            gx0, gy0 = self._to_grid(x, y)
+            best = None
+            best_d2 = float("inf")
+            max_r = max(self.grid_w, self.grid_h)
+            for r in range(0, max_r + 1):
+                for gx in range(max(0, gx0 - r), min(self.grid_w, gx0 + r + 1)):
+                    for gy in (gy0 - r, gy0 + r):
+                        if gy < 0 or gy >= self.grid_h:
+                            continue
+                        nx = self.die.x_min + gx * self.grid_res
+                        ny = self.die.y_min + gy * self.grid_res
+                        nx, ny = self._snap(nx, ny)
+                        nx = max(self.die.x_min, min(self.die.x_max - w, nx))
+                        ny = max(self.die.y_min, min(self.die.y_max - h, ny))
+                        if not self._check_overlap(nx, ny, w, h):
+                            d2 = (nx - x) ** 2 + (ny - y) ** 2
+                            if d2 < best_d2:
+                                best_d2 = d2
+                                best = (nx, ny)
+                for gy in range(max(0, gy0 - r + 1), min(self.grid_h, gy0 + r)):
+                    for gx in (gx0 - r, gx0 + r):
+                        if gx < 0 or gx >= self.grid_w:
+                            continue
+                        nx = self.die.x_min + gx * self.grid_res
+                        ny = self.die.y_min + gy * self.grid_res
+                        nx, ny = self._snap(nx, ny)
+                        nx = max(self.die.x_min, min(self.die.x_max - w, nx))
+                        ny = max(self.die.y_min, min(self.die.y_max - h, ny))
+                        if not self._check_overlap(nx, ny, w, h):
+                            d2 = (nx - x) ** 2 + (ny - y) ** 2
+                            if d2 < best_d2:
+                                best_d2 = d2
+                                best = (nx, ny)
+                if best is not None:
+                    return best
+
+        # Give up (caller decides)
+        return x, y
     
     def legalize(self, macros: List[Macro]) -> List[Macro]:
         """Final legalization with guaranteed 0% overlap."""
@@ -723,6 +779,8 @@ class TetrisLegalizer:
                 self._mark_occupied(x, y, macro.w, macro.h)
             else:
                 failed += 1
+                if self.strict:
+                    raise RuntimeError(f"TetrisLegalizer failed to legalize macro={macro.name}")
             
             result.append(Macro(
                 name=macro.name,
@@ -731,8 +789,8 @@ class TetrisLegalizer:
                 orient=macro.orient,
             ))
         
-        if failed > 0:
-            print(f"    ⚠️ TetrisLegalizer: {failed} macros could not find valid position")
+        if (failed > 0) and (not self.strict):
+            pass
         
         return result
 
@@ -842,7 +900,7 @@ def calculate_overlap_area(macros: List[Macro]) -> float:
 
 
 def load_model(checkpoint_path: str, device: str) -> DiffPlace:
-    print(f"Loading model: {checkpoint_path}")
+    # no logs
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     
     config = checkpoint.get('config', {})
@@ -860,7 +918,7 @@ def load_model(checkpoint_path: str, device: str) -> DiffPlace:
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    print(f"  Model: {sum(p.numel() for p in model.parameters()):,} params")
+    # no logs
     return model
 
 
@@ -876,19 +934,27 @@ def run_inference(
     max_nodes: int = 50000,
     ddim_steps: int = 50,
     guidance_scale: float = 2000.0,  # FIXED: High scale for effective steering
+    overlap_guidance_scale_max: float = 1000.0,
+    overlap_guidance_power: float = 2.0,
+    overlap_guidance_start_frac: float = 0.7,
+    overlap_guidance_grad_norm: float = 0.05,
+    overlap_guidance_grad_clip: float = 0.2,
+    overlap_refine_steps: int = 0,
+    overlap_refine_lr: float = 0.05,
+    overlap_refine_anchor_weight: float = 0.1,
+    overlap_refine_anchor_weight_start: Optional[float] = None,
+    overlap_refine_anchor_weight_end: Optional[float] = None,
+    tetris_grid_resolution: Optional[float] = None,
     device: str = "cuda",
 ):
     """Run dual-stage inference."""
-    print(f"\n{'='*70}")
-    print(f"BENCHMARK: {benchmark_name}")
-    print(f"{'='*70}")
+    pass
     
     # 1. Parse benchmark
     die = parse_scl_for_die(benchmark_dir, benchmark_name)
     orig_sizes = get_original_sizes(benchmark_dir, benchmark_name)
     
-    print(f"  Die: {die.width:.0f} x {die.height:.0f}")
-    print(f"  Row Height: {die.row_height}")
+    pass
     
     # 2. Build graph with smart subsampling (macros first)
     parser = BookshelfParser(benchmark_dir, benchmark_name)
@@ -898,7 +964,7 @@ def run_inference(
     macro_names = [n for n in all_nodes if orig_sizes.get(n, (0, 0))[1] > die.row_height]
     stdcell_names = [n for n in all_nodes if orig_sizes.get(n, (0, 0))[1] <= die.row_height]
     
-    print(f"  Total: {len(all_nodes)} ({len(macro_names)} macros)")
+    pass
     
     # Select nodes: all macros + sample stdcells
     selected = macro_names.copy()
@@ -909,7 +975,7 @@ def run_inference(
         indices = np.random.choice(len(stdcell_names), sample_size, replace=False)
         selected.extend([stdcell_names[i] for i in sorted(indices)])
     
-    print(f"  Selected: {len(selected)} (all {len(macro_names)} macros)")
+    pass
     
     # Build tensors (STRICT MODE: random init for macros)
     V = len(selected)
@@ -945,8 +1011,7 @@ def run_inference(
                 positions[i] = torch.randn(2) * 1000 + 5000
             fixed_count += 1
     
-    print(f"  ✓ Movable Macros: {movable_count} (RANDOM)")
-    print(f"  ✓ Fixed Context: {fixed_count}")
+    pass
     
     # Normalize
     positions[:, 0] = (positions[:, 0] - die.x_min) / die.width * 2 - 1
@@ -954,6 +1019,12 @@ def run_inference(
     sizes_norm = sizes_tensor.clone()
     sizes_norm[:, 0] = sizes_tensor[:, 0] / die.width * 0.1
     sizes_norm[:, 1] = sizes_tensor[:, 1] / die.height * 0.1
+
+    # OverlapLoss MUST use sizes in the SAME coordinate system as positions ([-1, 1]).
+    # For a length in microns: normalized_length = (length / die_extent) * 2.
+    overlap_sizes = sizes_tensor.clone()
+    overlap_sizes[:, 0] = sizes_tensor[:, 0] / die.width * 2.0
+    overlap_sizes[:, 1] = sizes_tensor[:, 1] / die.height * 2.0
     
     # Build edges
     edges_src, edges_dst = [], []
@@ -975,94 +1046,189 @@ def run_inference(
         is_ports=~is_macro,  # Fixed nodes are ports
         num_nodes=V,
     ).to(device)
+    data.overlap_sizes = overlap_sizes.to(device)
     
-    print(f"  Nodes: {V}, Edges: {edge_index.shape[1]}")
+    pass
     
     # ========================================
-    # STAGE 1: DDIM with Density Guidance
+    # STAGE 1A: Standard DDIM (baseline)
     # ========================================
-    print(f"\n[STAGE 1] DDIM Sampling + Density Guidance ({ddim_steps} steps, scale={guidance_scale})")
-    
-    pred_pos, pred_rot = sample_ddim_with_density_guidance(
-        model=model,
-        data=data,
-        sizes=sizes_norm.to(device),
-        macro_mask=is_macro.to(device),
-        num_inference_steps=ddim_steps,
-        guidance_scale=guidance_scale,
-        device=device,
-    )
-    
-    # Extract macro positions
+    pass
+    with torch.no_grad():
+        pred_pos_base, pred_rot_base, _ = model.sample_ddim(
+            cond=data,
+            batch_size=1,
+            num_inference_steps=ddim_steps,
+            eta=0.0,
+            guidance_scale=0.0,
+            overlap_guidance=False,
+            overlap_sizes=data.overlap_sizes,
+            return_intermediates=False,
+        )
+
+    # ========================================
+    # STAGE 1B: DDIM + Gradient-Guided Legalization (overlap)
+    # ========================================
+    pass
+    with torch.no_grad():
+        pred_pos, pred_rot, _ = model.sample_ddim(
+            cond=data,
+            batch_size=1,
+            num_inference_steps=ddim_steps,
+            eta=0.0,
+            guidance_scale=0.0,
+            overlap_guidance=True,
+            overlap_guidance_scale_max=overlap_guidance_scale_max,
+            overlap_guidance_power=overlap_guidance_power,
+            overlap_sizes=data.overlap_sizes,
+            overlap_guidance_start_frac=overlap_guidance_start_frac,
+            overlap_guidance_grad_norm=overlap_guidance_grad_norm,
+            overlap_guidance_grad_clip=overlap_guidance_grad_clip,
+            return_intermediates=False,
+        )
+
+    # ========================================
+    # STAGE 1C: Local Overlap Refinement (anchored)
+    # ========================================
+    # Resolves "hard" residual overlaps without re-spreading everything to the boundary.
+    if overlap_refine_steps > 0:
+        # Allow anchor scheduling (start loose -> end tight).
+        if overlap_refine_anchor_weight_start is None:
+            overlap_refine_anchor_weight_start = float(overlap_refine_anchor_weight)
+        if overlap_refine_anchor_weight_end is None:
+            overlap_refine_anchor_weight_end = float(overlap_refine_anchor_weight)
+
+        pass
+        overlap_loss_fn = OverlapLoss().to(device)
+        x0 = pred_pos.detach()  # (1, V, 2) normalized centers
+        x = x0.clone().detach()
+
+        fixed_pos = data.pos.unsqueeze(0)[:, :, :2]
+        is_fixed = getattr(data, "is_ports", None)
+        fixed_mask_3d = None
+        if is_fixed is not None:
+            fixed_mask_3d = is_fixed.unsqueeze(0).unsqueeze(-1).expand_as(x)
+
+        macro_mask = is_macro.to(device=device)
+        sizes_for_overlap = data.overlap_sizes
+
+        with torch.enable_grad():
+            for k in range(int(overlap_refine_steps)):
+                x = x.detach().requires_grad_(True)
+                loss_ov = overlap_loss_fn(x, sizes_for_overlap, macro_mask=macro_mask)
+                loss_anchor = F.mse_loss(x, x0)
+                # Linearly ramp anchor (escape first, then settle)
+                if overlap_refine_steps <= 1:
+                    aw = float(overlap_refine_anchor_weight_end)
+                else:
+                    p = float(k) / float(overlap_refine_steps - 1)
+                    aw = (1.0 - p) * float(overlap_refine_anchor_weight_start) + p * float(overlap_refine_anchor_weight_end)
+                loss = loss_ov + aw * loss_anchor
+                g = torch.autograd.grad(loss, x, retain_graph=False, create_graph=False)[0]
+                g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+                x = (x - float(overlap_refine_lr) * g).detach()
+                x = x.clamp(-1.0, 1.0)
+                if fixed_mask_3d is not None:
+                    x = torch.where(fixed_mask_3d, fixed_pos, x)
+
+                if (k + 1) % 10 == 0:
+                    with torch.no_grad():
+                        ov_val = overlap_loss_fn(x, sizes_for_overlap, macro_mask=macro_mask).item()
+
+        pred_pos = x
+
+    # Extract macro positions (centers, normalized)
+    pred_pos_base = pred_pos_base.squeeze(0).float().cpu().numpy()
+    pred_rot_base = pred_rot_base.squeeze(0).argmax(dim=-1).cpu().numpy()
+
     pred_pos = pred_pos.squeeze(0).float().cpu().numpy()
     pred_rot = pred_rot.squeeze(0).argmax(dim=-1).cpu().numpy()
     
     macro_indices = torch.where(is_macro)[0].tolist()
+    macro_pos_base = pred_pos_base[macro_indices]
+    macro_rot_base = pred_rot_base[macro_indices]
+
     macro_pos = pred_pos[macro_indices]
     macro_rot = pred_rot[macro_indices]
     macro_size_list = [orig_sizes[macro_names[i]] for i in range(len(macro_names))]
     
-    # Scale to die coordinates
+    # Scale to die coordinates (centers)
+    macro_pos_base[:, 0] = (macro_pos_base[:, 0] + 1) / 2 * die.width + die.x_min
+    macro_pos_base[:, 1] = (macro_pos_base[:, 1] + 1) / 2 * die.height + die.y_min
+
     macro_pos[:, 0] = (macro_pos[:, 0] + 1) / 2 * die.width + die.x_min
     macro_pos[:, 1] = (macro_pos[:, 1] + 1) / 2 * die.height + die.y_min
     
     orient_map_inv = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
     
-    macros_stage1 = []
-    for i, name in enumerate(macro_names):
-        x, y = macro_pos[i]
-        w, h = macro_size_list[i]
-        x = max(die.x_min, min(die.x_max - w, x))
-        y = max(die.y_min, min(die.y_max - h, y))
-        macros_stage1.append(Macro(name=name, x=x, y=y, w=w, h=h, orient=orient_map_inv.get(macro_rot[i], 'N')))
-    
+    def _centers_to_macros(centers_xy, rots):
+        macros = []
+        for i, name in enumerate(macro_names):
+            cx, cy = centers_xy[i]
+            w, h = macro_size_list[i]
+            # Convert center -> lower-left for overlap/HPWL utilities in this script
+            x = cx - w / 2
+            y = cy - h / 2
+            x = max(die.x_min, min(die.x_max - w, x))
+            y = max(die.y_min, min(die.y_max - h, y))
+            macros.append(Macro(name=name, x=x, y=y, w=w, h=h, orient=orient_map_inv.get(int(rots[i]), 'N')))
+        return macros
+
+    macros_base = _centers_to_macros(macro_pos_base, macro_rot_base)
+    macros_stage1 = _centers_to_macros(macro_pos, macro_rot)
+
+    hpwl_base = calculate_hpwl(macros_base)
+    overlap_base = calculate_overlap_area(macros_base)
+
     hpwl_stage1 = calculate_hpwl(macros_stage1)
     overlap_stage1 = calculate_overlap_area(macros_stage1)
-    
-    print(f"  → HPWL: {hpwl_stage1:,.0f}")
-    print(f"  → Overlap: {overlap_stage1:,.0f}")
-    
+
+     # ========================================
+    # STAGE 2: Sequence Pair Legalizer
     # ========================================
-    # STAGE 2: Analytical Legalizer (Global Spreading)
-    # ========================================
-    print(f"\n[STAGE 2] Analytical Legalizer (Global Spreading)")
     
-    legalizer = AnalyticalLegalizer(die_bounds=die)  # Uses new aggressive defaults
+    legalizer = SequencePairLegalizer(
+        die_bounds=die,
+        num_iterations=1,
+        gap_margin=1.0,
+        verbose=False
+    )
     
     macros_stage2 = legalizer.legalize(macros_stage1)
     
     hpwl_stage2 = calculate_hpwl(macros_stage2)
     overlap_stage2 = calculate_overlap_area(macros_stage2)
     
-    print(f"  → HPWL: {hpwl_stage2:,.0f} ({'+' if hpwl_stage2 > hpwl_stage1 else ''}{(hpwl_stage2 - hpwl_stage1) / max(hpwl_stage1, 1) * 100:.1f}%)")
-    print(f"  → Overlap: {overlap_stage2:,.0f} ({(overlap_stage1 - overlap_stage2) / max(overlap_stage1, 1) * 100:.1f}% reduction)")
+    pass
     
     # ========================================
-    # STAGE 3: Tetris Legalizer (Final Cleanup)
+    # STAGE 3: Final Cleanup (if needed)
     # ========================================
-    print(f"\n[STAGE 3] Tetris Legalizer (Zero Overlap)")
+    if overlap_stage2 > 0:
+        pass
+        grid_res = tetris_grid_resolution if tetris_grid_resolution is not None else max(die.site_width, 1.0)
+        tetris = TetrisLegalizer(
+            die_bounds=die,
+            grid_resolution=grid_res,
+            fallback_scan=True,
+            pick_best=True,
+            strict=True,
+        )
+        macros_stage3 = tetris.legalize(macros_stage2)
+    else:
+        pass
+        macros_stage3 = macros_stage2
     
-    tetris = TetrisLegalizer(die_bounds=die, grid_resolution=max(die.row_height, 5))
-    macros_stage3 = tetris.legalize(macros_stage2)
     
     hpwl_stage3 = calculate_hpwl(macros_stage3)
     overlap_stage3 = calculate_overlap_area(macros_stage3)
     
-    print(f"  → HPWL: {hpwl_stage3:,.0f} ({'+' if hpwl_stage3 > hpwl_stage2 else ''}{(hpwl_stage3 - hpwl_stage2) / max(hpwl_stage2, 1) * 100:.1f}%)")
-    print(f"  → Overlap: {overlap_stage3:,.0f}")
-    
-    # ========================================
-    # Summary
-    # ========================================
-    print(f"\n{'='*70}")
-    print(f"SUMMARY: {benchmark_name}")
-    print(f"{'='*70}")
-    print(f"{'Stage':<25} {'HPWL':>12} {'Overlap':>15}")
-    print(f"{'-'*70}")
-    print(f"{'Stage 1 (DDIM+Guidance):':<25} {hpwl_stage1:>12,.0f} {overlap_stage1:>15,.0f}")
-    print(f"{'Stage 2 (Analytical):':<25} {hpwl_stage2:>12,.0f} {overlap_stage2:>15,.0f}")
-    print(f"{'Stage 3 (Tetris):':<25} {hpwl_stage3:>12,.0f} {overlap_stage3:>15,.0f}")
-    print(f"{'='*70}")
+    pass
+
+    # Hard guarantee: never return an overlapped result.
+    if overlap_stage3 > 0:
+        raise RuntimeError(f"Non-zero overlap after legalization: {overlap_stage3}")
+
     
     # Save result
     result = {
@@ -1070,9 +1236,11 @@ def run_inference(
         'die_area': {'width': die.width, 'height': die.height, 'x_min': die.x_min, 'y_min': die.y_min},
         'macros': {m.name: {'x': m.x, 'y': m.y, 'w': m.w, 'h': m.h, 'orient': m.orient} for m in macros_stage3},
         'num_macros': len(macros_stage3),
+        'hpwl_base': hpwl_base,
         'hpwl_stage1': hpwl_stage1,
         'hpwl_stage2': hpwl_stage2,
         'hpwl_final': hpwl_stage3,
+        'overlap_base': overlap_base,
         'overlap_stage1': overlap_stage1,
         'overlap_stage2': overlap_stage2,
         'overlap_final': overlap_stage3,
@@ -1082,8 +1250,7 @@ def run_inference(
     output_path = os.path.join(output_dir, f"{benchmark_name}.pkl")
     with open(output_path, 'wb') as f:
         pickle.dump(result, f)
-    
-    print(f"  Saved: {output_path}")
+
     
     return result
 
@@ -1119,7 +1286,7 @@ def visualize_result(result: Dict, output_path: str):
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
-    print(f"  Visualization: {output_path}")
+    pass
 
 
 def parse_args():
@@ -1131,6 +1298,17 @@ def parse_args():
     p.add_argument("--max_nodes", type=int, default=50000)
     p.add_argument("--ddim_steps", type=int, default=50)
     p.add_argument("--guidance_scale", type=float, default=10.0)
+    p.add_argument("--overlap_guidance_scale_max", type=float, default=1000.0)
+    p.add_argument("--overlap_guidance_power", type=float, default=2.0)
+    p.add_argument("--overlap_guidance_start_frac", type=float, default=0.7)
+    p.add_argument("--overlap_guidance_grad_norm", type=float, default=0.05)
+    p.add_argument("--overlap_guidance_grad_clip", type=float, default=0.2)
+    p.add_argument("--overlap_refine_steps", type=int, default=0)
+    p.add_argument("--overlap_refine_lr", type=float, default=0.05)
+    p.add_argument("--overlap_refine_anchor_weight", type=float, default=0.1)
+    p.add_argument("--overlap_refine_anchor_weight_start", type=float, default=None)
+    p.add_argument("--overlap_refine_anchor_weight_end", type=float, default=None)
+    p.add_argument("--tetris_grid_resolution", type=float, default=None)
     p.add_argument("--visualize", action="store_true")
     return p.parse_args()
 
@@ -1138,7 +1316,7 @@ def parse_args():
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    pass
     
     model = load_model(args.checkpoint, device)
     
@@ -1153,6 +1331,17 @@ def main():
                 max_nodes=args.max_nodes,
                 ddim_steps=args.ddim_steps,
                 guidance_scale=args.guidance_scale,
+                overlap_guidance_scale_max=args.overlap_guidance_scale_max,
+                overlap_guidance_power=args.overlap_guidance_power,
+                overlap_guidance_start_frac=args.overlap_guidance_start_frac,
+                overlap_guidance_grad_norm=args.overlap_guidance_grad_norm,
+                overlap_guidance_grad_clip=args.overlap_guidance_grad_clip,
+                overlap_refine_steps=args.overlap_refine_steps,
+                overlap_refine_lr=args.overlap_refine_lr,
+                overlap_refine_anchor_weight=args.overlap_refine_anchor_weight,
+                overlap_refine_anchor_weight_start=args.overlap_refine_anchor_weight_start,
+                overlap_refine_anchor_weight_end=args.overlap_refine_anchor_weight_end,
+                tetris_grid_resolution=args.tetris_grid_resolution,
                 device=device,
             )
             results.append(result)
@@ -1162,20 +1351,10 @@ def main():
                 visualize_result(result, vis_path)
                 
         except Exception as e:
-            print(f"  ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            # Silent failure (non-zero exit); do not print.
+            raise
     
-    # Final summary
-    print("\n" + "=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
-    print(f"{'Benchmark':<12} {'Macros':>8} {'HPWL Stage1':>14} {'HPWL Stage2':>14} {'Overlap':>12}")
-    print("-" * 80)
-    for r in results:
-        print(f"{r['name']:<12} {r['num_macros']:>8} {r['hpwl_stage1']:>14,.0f} "
-              f"{r['hpwl_stage2']:>14,.0f} {r['overlap_stage2']:>12,.0f}")
-    print("=" * 80)
+
 
 
 if __name__ == "__main__":
