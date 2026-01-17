@@ -46,7 +46,7 @@ python train.py --config engine/conf/finetune.yaml --dataset_type ispd --data_di
 ```bash
 python scripts/deploy_nangate45.py \
   --checkpoint path/to/checkpoint.pt \
-  --design_dir path/to/MacroPlacement/Flows/NanGate45/ariane133 \
+  --design_dir path/to/ariane133 \
   --output_pkl results/ariane133.pkl
 ```
 
