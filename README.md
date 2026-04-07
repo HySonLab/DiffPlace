@@ -64,3 +64,14 @@ Additional modern SoC benchmarks (Ariane, NVDLA, MemPool, BlackParrot) available
 pip install -r requirements.txt
 ```
 
+## If our work is usefule, please cite the paper!
+
+```bibtex
+@article{trung2025diffplace,
+  title={DiffPlace: A Conditional Diffusion Framework for Simultaneous VLSI Placement Beyond Sequential Paradigms},
+  author={Trung, Kien Le and Hy, Truong-Son},
+  journal={arXiv preprint arXiv:2510.15897},
+  year={2025}
+}
+```
+
